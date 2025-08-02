@@ -11,6 +11,7 @@ const UserWardrobe = require('./models/UserWardrobe');
 const extractMetadataFromGemini = require('./utils/extractMetadata');
 const extractMetadataFromImage = require('./utils/extractMetadata');
 const fetch = require('node-fetch');
+const { authenticateToken, generateToken } = require('./middleware/auth');
 const app = express();
 const port = 5000;
 const FormData = require('form-data');
@@ -32,12 +33,12 @@ mongoose.connect('mongodb+srv://yatirastogi:z3oHwdz93k6OPeQ2@cluster0.atxgff3.mo
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
 // --- User-specific Clothing Upload Route ---
-app.post('/upload', upload.single('image'), async (req, res) => {
+app.post('/upload', authenticateToken, upload.single('image'), async (req, res) => {
   try {
     const category = req.query.category;
-    const userId = req.body.userId;
+    const userId = req.user.userId; // Get userId from JWT token
     const filePath = req.file.path;
-    if (!userId) return res.status(400).json({ error: 'User ID required' });
+    
     if (!['top', 'bottom', 'dress'].includes(category)) {
       return res.status(400).json({ error: '❌ Invalid clothing category' });
     }
@@ -71,11 +72,10 @@ app.post('/upload', upload.single('image'), async (req, res) => {
 });
 
 // --- User-specific User Image Upload ---
-app.post('/upload-user-image', upload.single('image'), async (req, res) => {
+app.post('/upload-user-image', authenticateToken, upload.single('image'), async (req, res) => {
   try {
-    const userId = req.body.userId;
+    const userId = req.user.userId; // Get userId from JWT token
     const filePath = req.file.path;
-    if (!userId) return res.status(400).json({ error: 'User ID required' });
     const result = await cloudinary.uploader.upload(filePath, {
       folder: `wardrobe/${userId}/user_photos`,
     });
@@ -114,11 +114,11 @@ app.post('/upload-user-image', upload.single('image'), async (req, res) => {
 });
 
 // --- User-specific Outfit fetch route ---
-app.get('/outfits', async (req, res) => {
-  const userId = req.query.userId;
+app.get('/outfits', authenticateToken, async (req, res) => {
+  const userId = req.user.userId; // Get userId from JWT token
   const category = req.query.folder;
-  if (!userId || !category) {
-    return res.status(400).json({ error: 'User ID and folder (category) are required' });
+  if (!category) {
+    return res.status(400).json({ error: 'Folder (category) is required' });
   }
   try {
     // Only fetch clothes for this user and category
@@ -129,7 +129,6 @@ app.get('/outfits', async (req, res) => {
     const urls = (wardrobe && wardrobe.clothes) ? wardrobe.clothes.map(item => item.url) : [];
     res.json({ urls });
   } catch (err) {
-    console.error('❌ User-specific outfit fetch error:', err);
     res.status(500).json({ error: 'Failed to fetch user outfits' });
   }
 });
@@ -179,9 +178,8 @@ app.post('/tryon', async (req, res) => {
 
 // ✅ Get all user features (metadata)
 // Get user features for a specific user
-app.get('/user-features', async (req, res) => {
-  const userId = req.query.userId;
-  if (!userId) return res.status(400).json({ error: 'User ID required' });
+app.get('/user-features', authenticateToken, async (req, res) => {
+  const userId = req.user.userId; // Get userId from JWT token
   try {
     const wardrobe = await UserWardrobe.findOne({ userId });
     if (!wardrobe || !wardrobe.userFeatures || Object.keys(wardrobe.userFeatures).length === 0) {
@@ -203,11 +201,8 @@ app.get('/clothes-metadata', async (req, res) => {
   }
 });
 // ✅ Suggest outfit using AI (Gemini or similar)
-app.post('/suggest-outfit', async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID required' });
-  }
+app.post('/suggest-outfit', authenticateToken, async (req, res) => {
+  const userId = req.user.userId; // Get userId from JWT token
   try {
     // Fetch user features and clothes for this user
     const wardrobe = await UserWardrobe.findOne({ userId }).populate('clothes');
@@ -255,7 +250,6 @@ app.post('/suggest-outfit', async (req, res) => {
       reason: reason
     });
   } catch (err) {
-    console.error('Suggest outfit error:', err);
     res.status(500).json({ error: 'Failed to suggest outfit', details: err.message });
   }
 });
@@ -296,7 +290,6 @@ app.post('/create', async (req, res) => {
 
   } catch (err) {
     // The catch block is unchanged but will now report errors more clearly.
-    console.error("CREATE USER ERROR:", err);
     res.status(500).json({ error: 'Server error', details: err.message });
   }
 });
@@ -315,7 +308,20 @@ app.post('/login', async (req, res) => {
     if (user.password !== password) {
       return res.status(401).json({ error: 'Incorrect password.' });
     }
-    res.json({ message: 'Login successful', user: { _id: user._id, email: user.email, username: user.username, createdAt: user.createdAt } });
+    
+    // Generate JWT token
+    const token = generateToken(user._id);
+    res.json({ 
+      message: 'Login successful',
+      token: token,
+      user: { 
+        _id: user._id, 
+        name: user.name,
+        email: user.email, 
+        username: user.username, 
+        createdAt: user.createdAt 
+      } 
+    });
   } catch (err) {
     res.status(500).json({ error: 'Server error', details: err.message });
   }
@@ -389,18 +395,12 @@ app.get('/check-username', async (req, res) =>
 });
 
 
-app.get('/user-photos', async (req, res) => {
+app.get('/user-photos', authenticateToken, async (req, res) => {
   try {
+    // Get userId from JWT token
+    const userId = req.user.userId;
 
-    // 1. Get the userId from the request query parameters.
-    const { userId } = req.query;
-    //console.log(userId);
-    // 2. Validate that the userId was provided. If not, send a Bad Request error.
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required.' });
-    }
-
-    // 3. Find the user's wardrobe document in the database using their userId.
+    // Find the user's wardrobe document in the database using their userId.
     const wardrobe = await UserWardrobe.findOne({ userId });
     
     if (!wardrobe || !wardrobe.userPhotoUrl) {
@@ -412,8 +412,17 @@ app.get('/user-photos', async (req, res) => {
 
   } catch (err) {
     // 6. Handle any unexpected server errors.
-    console.error('❌ Fetch user photos error:', err);
     res.status(500).json({ error: 'Failed to fetch user photos.' });
+  }
+});
+app.get('/me', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId; // from JWT
+    const user = await WardrobeUser.findById(userId).select('-password');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 app.listen(port, () => {
